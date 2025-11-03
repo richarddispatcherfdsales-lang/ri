@@ -22,6 +22,9 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       - name: Calculate total number of batches
         id: set-matrix
         run: |
@@ -105,14 +108,15 @@ jobs:
           csv_files = glob.glob(os.path.join(path, "**", "*.csv"), recursive=True)
           if not csv_files:
               print("⚠️ No CSV files found to merge.")
-              exit(1)
+              exit(0)
           print(f"Found {len(csv_files)} CSV files to merge.")
           all_dfs = [pd.read_csv(f, on_bad_lines='skip') for f in csv_files if os.path.getsize(f) > 0]
           if not all_dfs:
               print("⚠️ All CSV files were empty or corrupt.")
-              exit(1)
+              exit(0)
           final_df = pd.concat(all_dfs, ignore_index=True)
-          final_df.drop_duplicates(subset=['mcNumber', 'email'], keep='first', inplace=True)
+          # This line is now corrected to use the proper Capitalized column names
+          final_df.drop_duplicates(subset=['MC_Number', 'Email'], keep='first', inplace=True)
           output_path = "output/merged_fmcsa_data.csv"
           os.makedirs("output", exist_ok=True)
           final_df.to_csv(output_path, index=False)
@@ -120,14 +124,11 @@ jobs:
           EOF
 
       - name: Commit and push the merged data file
-        # <<< YEH AAKHRI AUR FINAL UPDATE HAI
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Push karne se pehle pull karein taake remote changes haasil ho jayein
           git pull
           git add output/merged_fmcsa_data.csv
-          # Check karein ke commit karne ke liye kuch hai ya nahi
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
