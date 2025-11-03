@@ -85,7 +85,6 @@ function parseAddress(addressString) {
             state: match[2].trim(),
         };
     }
-    // Fallback for addresses without a clear format
     const parts = addressString.split(',');
     if (parts.length >= 2) {
         const stateZip = parts[parts.length - 1].trim().split(/\s+/);
@@ -97,12 +96,27 @@ function parseAddress(addressString) {
     return { city: '', state: '' };
 }
 
+// ✅✅✅ THE FIX IS IN THIS FUNCTION ✅✅✅
 function getXMarkedItems(html, sectionHeader) {
     const items = [];
-    // Find the table section for the given header (e.g., "Cargo Carried:")
-    const sectionRegex = new RegExp(`>${sectionHeader}<\\/a><\\/td>[\\s\\S]*?<table[\\s\\S]*?([\\s\\S]*?)<\\/table>`);
+    // This regex first finds the correct table based on the sectionHeader, then looks for 'X' marks inside it.
+    const sectionRegex = new RegExp(`${sectionHeader}<\\/a><\\/td>[\\s\\S]*?<table.*?([\\s\\S]*?)<\\/table>`, 'i');
     const sectionMatch = html.match(sectionRegex);
-    if (!sectionMatch || !sectionMatch[1]) return [];
+    
+    if (!sectionMatch || !sectionMatch[1]) {
+        // Fallback for the very first table on the page (Operation Classification)
+        const opClassRegex = /Operation Classification:[\\s\\S]*?<table.*?([\\s\\S]*?)<\\/table>/i;
+        const opClassMatch = html.match(opClassRegex);
+        if (!opClassMatch || !opClassMatch[1]) return [];
+        
+        const opClassTableHtml = opClassMatch[1];
+        const findXRegex = /<td class="queryfield"[^>]*>X<\/td>\s*<td><font[^>]+>([^<]+)<\/font><\/td>/gi;
+        let match;
+        while ((match = findXRegex.exec(opClassTableHtml)) !== null) {
+            items.push(match[1].trim());
+        }
+        return [...new Set(items)];
+    }
 
     const tableHtml = sectionMatch[1];
     const findXRegex = /<td class="queryfield"[^>]*>X<\/td>\s*<td><font[^>]+>([^<]+)<\/font><\/td>/gi;
@@ -113,8 +127,8 @@ function getXMarkedItems(html, sectionHeader) {
     return [...new Set(items)];
 }
 
+
 async function extractAllData(url, html) {
-    // Basic Info
     const legalName = extractDataByHeader(html, 'Legal Name:');
     const usdotNumber = extractDataByHeader(html, 'USDOT Number:');
     const phone = extractDataByHeader(html, 'Phone:');
@@ -122,31 +136,26 @@ async function extractAllData(url, html) {
     const powerUnits = extractDataByHeader(html, 'Power Units:');
     const drivers = extractDataByHeader(html, 'Drivers:');
     
-    // Status
     const usdotStatus = extractDataByHeader(html, 'USDOT Status:');
-    const authStatus = extractDataByHeader(html, 'Operating Authority Status:');
-    const status = usdotStatus.includes('ACTIVE') && authStatus.includes('AUTHORIZED') ? 'Active' : 'Inactive';
+    const authStatusText = extractDataByHeader(html, 'Operating Authority Status:');
+    const status = usdotStatus.toUpperCase().includes('ACTIVE') && authStatusText.toUpperCase().includes('AUTHORIZED') ? 'Active' : 'Inactive';
 
-    // MC Number
     let mcNumber = '';
     const mcMatch = html.match(/MC-(\d{3,9})/i);
     if (mcMatch && mcMatch[1]) {
         mcNumber = mcMatch[1];
     }
 
-    // Address
     const physicalAddress = extractDataByHeader(html, 'Physical Address:');
     const { city, state } = parseAddress(physicalAddress);
 
-    // Authority Type
-    const authorityTypeMatch = authStatus.match(/AUTHORIZED FOR (Property|Passenger|HHG)/i);
+    const authorityTypeMatch = authStatusText.match(/AUTHORIZED FOR (Property|Passenger|HHG)/i);
     const authorityType = authorityTypeMatch ? authorityTypeMatch[1] : '';
 
-    // X-Marked Items
+    // Correctly calling the function for each section
     const operationTypes = getXMarkedItems(html, 'Carrier Operation:');
     const cargoCarried = getXMarkedItems(html, 'Cargo Carried:');
 
-    // Deep fetch for Email
     let email = '';
     const smsLinkMatch = html.match(/href=["']([^"']*(safer_xfr\.aspx|\/SMS\/)[^"']*)["']/i);
     if (smsLinkMatch && smsLinkMatch[1]) {
@@ -182,7 +191,7 @@ async function extractAllData(url, html) {
         Email: email,
         Operation_Type: operationTypes.join(', '),
         Entity_Type: entityType,
-        Script_Output: '', // As requested, an empty column
+        Script_Output: '',
     };
 }
 
@@ -196,14 +205,12 @@ async function handleMC(mc) {
       return { valid: false };
     }
 
-    // Filter 1: Authorization Status
     const authStatusText = extractDataByHeader(html, 'Operating Authority Status:').toUpperCase();
     if (authStatusText.includes('NOT AUTHORIZED') || !authStatusText.includes('AUTHORIZED')) {
         console.log(`[${now()}] SKIPPING (Not Authorized) MC ${mc}`);
         return { valid: false };
     }
 
-    // Filter 2: Carrier Age (6+ months)
     const dateStr = extractDataByHeader(html, 'MCS-150 Form Date:');
     if (dateStr) {
         const formDate = new Date(dateStr);
@@ -219,7 +226,6 @@ async function handleMC(mc) {
         return { valid: false };
     }
 
-    // Filter 3: Power Units (min 1)
     const puText = extractDataByHeader(html, 'Power Units:');
     const powerUnits = Number(puText.replace(/,/g, ''));
     if (isNaN(powerUnits) || powerUnits < 1) {
@@ -227,7 +233,6 @@ async function handleMC(mc) {
         return { valid: false };
     }
 
-    // Filter 4: Drivers (min 1)
     const driverText = extractDataByHeader(html, 'Drivers:');
     const drivers = Number(driverText.replace(/,/g, ''));
     if (isNaN(drivers) || drivers < 1) {
@@ -236,7 +241,7 @@ async function handleMC(mc) {
     }
 
     const row = await extractAllData(url, html);
-    console.log(`[${now()}] SAVED → ${row.MC_Number || mc} | ${row.Legal_Name || '(no name)'} | Email: ${row.Email || 'N/A'}`);
+    console.log(`[${now()}] SAVED → ${row.MC_Number || mc} | ${row.Legal_Name || '(no name)'} | Cargo: ${row.Cargo_Carried || 'N/A'}`);
     return { valid: true, row };
   } catch (err) {
     console.log(`[${now()}] Fetch error MC ${mc} → ${err?.message}`);
@@ -277,7 +282,6 @@ async function run() {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const outCsv = path.join(OUTPUT_DIR, `fmcsa_batch_${BATCH_INDEX}_${ts}.csv`);
     
-    // Use the exact headers you requested
     const headers = [
         'MC_Number', 'USDOT_Number', 'Legal_Name', 'City', 'State', 'Status', 
         'Authority_Type', 'Power_Units', 'Drivers', 'Cargo_Carried', 'Phone', 
