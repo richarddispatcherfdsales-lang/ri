@@ -7,9 +7,7 @@ import AbortController from 'abort-controller';
 const CONCURRENCY = Number(process.env.CONCURRENCY || 4);
 const DELAY = Number(process.env.DELAY || 1000);
 const BATCH_INDEX = Number(process.env.BATCH_INDEX || 0);
-
-// ✅ Minimum age of the carrier in days (6 months ≈ 180 days)
-const MIN_AGE_DAYS = 180;
+const MIN_AGE_DAYS = 180; // 6 months
 
 const FETCH_TIMEOUT_MS = 30000;
 const MAX_RETRIES = 3;
@@ -80,44 +78,23 @@ function parseAddress(addressString) {
     if (!addressString) return { city: '', state: '' };
     const match = addressString.match(/,?\s*([^,]+),\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)/);
     if (match) {
-        return {
-            city: match[1].trim(),
-            state: match[2].trim(),
-        };
+        return { city: match[1].trim(), state: match[2].trim() };
     }
     const parts = addressString.split(',');
     if (parts.length >= 2) {
         const stateZip = parts[parts.length - 1].trim().split(/\s+/);
-        return {
-            city: parts[parts.length - 2].trim(),
-            state: stateZip[0] || '',
-        }
+        return { city: parts[parts.length - 2].trim(), state: stateZip[0] || '' };
     }
     return { city: '', state: '' };
 }
 
-// ✅✅✅ THE FIX IS IN THIS FUNCTION ✅✅✅
+// This is the fully corrected, smart function to get all X-marked items
 function getXMarkedItems(html, sectionHeader) {
     const items = [];
-    // This regex first finds the correct table based on the sectionHeader, then looks for 'X' marks inside it.
-    const sectionRegex = new RegExp(`${sectionHeader.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}<\\/a><\\/td>[\\s\\S]*?<table.*?([\\s\\S]*?)<\\/table>`, 'i');
+    const sectionRegex = new RegExp(`${sectionHeader.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}[\\s\\S]*?<table[\\s\\S]*?([\\s\\S]*?)<\\/table>`, 'i');
     const sectionMatch = html.match(sectionRegex);
 
     if (!sectionMatch || !sectionMatch[1]) {
-        // Fallback for the very first table on the page (Operation Classification) which has a different structure
-        if (sectionHeader.includes('Operation Classification')) {
-            const opClassRegex = /Operation Classification:<\/a><\/td>[\s\S]*?<table.*?([\s\S]*?)<\/table>/i;
-            const opClassMatch = html.match(opClassRegex);
-            if (!opClassMatch || !opClassMatch[1]) return [];
-            
-            const tableHtml = opClassMatch[1];
-            const findXRegex = /<td class="queryfield"[^>]*>X<\/td>\s*<td><font[^>]+>([^<]+)<\/font><\/td>/gi;
-            let match;
-            while ((match = findXRegex.exec(tableHtml)) !== null) {
-                items.push(match[1].trim());
-            }
-            return [...new Set(items)];
-        }
         return [];
     }
 
@@ -129,7 +106,6 @@ function getXMarkedItems(html, sectionHeader) {
     }
     return [...new Set(items)];
 }
-
 
 async function extractAllData(url, html) {
     const legalName = extractDataByHeader(html, 'Legal Name:');
@@ -155,7 +131,7 @@ async function extractAllData(url, html) {
     const authorityTypeMatch = authStatusText.match(/AUTHORIZED FOR (Property|Passenger|HHG)/i);
     const authorityType = authorityTypeMatch ? authorityTypeMatch[1] : '';
 
-    // Correctly calling the function for each section
+    // Correctly calling the smart function for each section
     const operationTypes = getXMarkedItems(html, 'Carrier Operation:');
     const cargoCarried = getXMarkedItems(html, 'Cargo Carried:');
 
