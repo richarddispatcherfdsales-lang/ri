@@ -6,14 +6,11 @@ import AbortController from 'abort-controller';
 // ---- Config ----
 const CONCURRENCY = Number(process.env.CONCURRENCY || 4);
 const DELAY = Number(process.env.DELAY || 1000);
-const BATCH_SIZE = Number(process.env.BATCH_SIZE || 250);
 const BATCH_INDEX = Number(process.env.BATCH_INDEX || 0);
-const MODE = String(process.env.MODE || 'both');
 
 // ✅ Minimum age of the carrier in days (6 months ≈ 180 days)
 const MIN_AGE_DAYS = 180;
 
-const EXTRACT_TIMEOUT_MS = 45000;
 const FETCH_TIMEOUT_MS = 30000;
 const MAX_RETRIES = 3;
 const BACKOFF_BASE_MS = 2000;
@@ -28,10 +25,6 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function mcToSnapshotUrl(mc) {
   const m = String(mc || '').replace(/\s+/g, '');
   return `https://safer.fmcsa.dot.gov/query.asp?searchtype=ANY&query_type=queryCarrierSnapshot&query_param=MC_MX&query_string=${encodeURIComponent(m )}`;
-}
-
-function absoluteUrl(base, href) {
-  try { return new URL(href, base).href; } catch { return href; }
 }
 
 async function fetchWithTimeout(url, ms, opts = {}) {
@@ -84,59 +77,86 @@ function extractDataByHeader(html, headerText) {
 }
 
 function parseAddress(addressString) {
-    if (!addressString) return { city: '', state: '', zip: '' };
+    if (!addressString) return { city: '', state: '' };
     const match = addressString.match(/,?\s*([^,]+),\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)/);
     if (match) {
         return {
             city: match[1].trim(),
             state: match[2].trim(),
-            zip: match[3].trim()
         };
     }
-    return { city: '', state: '', zip: '' };
+    // Fallback for addresses without a clear format
+    const parts = addressString.split(',');
+    if (parts.length >= 2) {
+        const stateZip = parts[parts.length - 1].trim().split(/\s+/);
+        return {
+            city: parts[parts.length - 2].trim(),
+            state: stateZip[0] || '',
+        }
+    }
+    return { city: '', state: '' };
 }
 
-function getXMarkedItems(html) {
+function getXMarkedItems(html, sectionHeader) {
     const items = [];
+    // Find the table section for the given header (e.g., "Cargo Carried:")
+    const sectionRegex = new RegExp(`>${sectionHeader}<\\/a><\\/td>[\\s\\S]*?<table[\\s\\S]*?([\\s\\S]*?)<\\/table>`);
+    const sectionMatch = html.match(sectionRegex);
+    if (!sectionMatch || !sectionMatch[1]) return [];
+
+    const tableHtml = sectionMatch[1];
     const findXRegex = /<td class="queryfield"[^>]*>X<\/td>\s*<td><font[^>]+>([^<]+)<\/font><\/td>/gi;
     let match;
-    while ((match = findXRegex.exec(html)) !== null) {
+    while ((match = findXRegex.exec(tableHtml)) !== null) {
         items.push(match[1].trim());
     }
     return [...new Set(items)];
 }
 
-
 async function extractAllData(url, html) {
-    const entityType = extractDataByHeader(html, 'Entity Type:');
+    // Basic Info
     const legalName = extractDataByHeader(html, 'Legal Name:');
-    const dbaName = extractDataByHeader(html, 'DBA Name:');
-    const physicalAddress = extractDataByHeader(html, 'Physical Address:');
-    const mailingAddress = extractDataByHeader(html, 'Mailing Address:');
-    const { city, state, zip } = parseAddress(physicalAddress || mailingAddress);
+    const usdotNumber = extractDataByHeader(html, 'USDOT Number:');
+    const phone = extractDataByHeader(html, 'Phone:');
+    const entityType = extractDataByHeader(html, 'Entity Type:');
+    const powerUnits = extractDataByHeader(html, 'Power Units:');
+    const drivers = extractDataByHeader(html, 'Drivers:');
     
-    const xMarkedItems = getXMarkedItems(html);
-    const operationType = xMarkedItems.includes('Auth. For Hire') ? 'Property' : (xMarkedItems.includes('Passengers') ? 'Passenger' : (xMarkedItems.includes('Broker') ? 'Broker' : ''));
-    
+    // Status
+    const usdotStatus = extractDataByHeader(html, 'USDOT Status:');
+    const authStatus = extractDataByHeader(html, 'Operating Authority Status:');
+    const status = usdotStatus.includes('ACTIVE') && authStatus.includes('AUTHORIZED') ? 'Active' : 'Inactive';
+
+    // MC Number
     let mcNumber = '';
-    const mcMatch = html.match(/MC-(\d{3,7})/i);
+    const mcMatch = html.match(/MC-(\d{3,9})/i);
     if (mcMatch && mcMatch[1]) {
-        mcNumber = 'MC-' + mcMatch[1];
+        mcNumber = mcMatch[1];
     }
 
-    let phone = extractDataByHeader(html, 'Phone:');
-    let email = '';
+    // Address
+    const physicalAddress = extractDataByHeader(html, 'Physical Address:');
+    const { city, state } = parseAddress(physicalAddress);
 
-    // ✅✅✅ CORRECTED: Email deep-fetch logic is now included ✅✅✅
+    // Authority Type
+    const authorityTypeMatch = authStatus.match(/AUTHORIZED FOR (Property|Passenger|HHG)/i);
+    const authorityType = authorityTypeMatch ? authorityTypeMatch[1] : '';
+
+    // X-Marked Items
+    const operationTypes = getXMarkedItems(html, 'Carrier Operation:');
+    const cargoCarried = getXMarkedItems(html, 'Cargo Carried:');
+
+    // Deep fetch for Email
+    let email = '';
     const smsLinkMatch = html.match(/href=["']([^"']*(safer_xfr\.aspx|\/SMS\/)[^"']*)["']/i);
     if (smsLinkMatch && smsLinkMatch[1]) {
-        const smsLink = absoluteUrl(url, smsLinkMatch[1]);
+        const smsLink = new URL(smsLinkMatch[1], url).href;
         await sleep(300);
         try {
             const smsHtml = await fetchRetry(smsLink, MAX_RETRIES, FETCH_TIMEOUT_MS, 'sms');
             const regLinkMatch = smsHtml.match(/href=["']([^"']*CarrierRegistration\.aspx[^"']*)["']/i);
             if (regLinkMatch && regLinkMatch[1]) {
-                const regLink = absoluteUrl(smsLink, regLinkMatch[1]);
+                const regLink = new URL(regLinkMatch[1], smsLink).href;
                 await sleep(300);
                 const regHtml = await fetchRetry(regLink, MAX_RETRIES, FETCH_TIMEOUT_MS, 'registration');
                 const emailMatch = regHtml.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
@@ -147,7 +167,23 @@ async function extractAllData(url, html) {
         }
     }
 
-    return { entityType, legalName, dbaName, mcNumber, phone, email, physicalAddress, mailingAddress, city, state, zip, operationType, url };
+    return {
+        MC_Number: mcNumber,
+        USDOT_Number: usdotNumber,
+        Legal_Name: legalName,
+        City: city,
+        State: state,
+        Status: status,
+        Authority_Type: authorityType,
+        Power_Units: powerUnits,
+        Drivers: drivers,
+        Cargo_Carried: cargoCarried.join(', '),
+        Phone: phone,
+        Email: email,
+        Operation_Type: operationTypes.join(', '),
+        Entity_Type: entityType,
+        Script_Output: '', // As requested, an empty column
+    };
 }
 
 async function handleMC(mc) {
@@ -199,11 +235,9 @@ async function handleMC(mc) {
         return { valid: false };
     }
 
-    if (MODE === 'urls') return { valid: true, url };
-
     const row = await extractAllData(url, html);
-    console.log(`[${now()}] SAVED → ${row.mcNumber || mc} | ${row.legalName || '(no name)'} | Email: ${row.email || 'N/A'}`);
-    return { valid: true, url, row };
+    console.log(`[${now()}] SAVED → ${row.MC_Number || mc} | ${row.Legal_Name || '(no name)'} | Email: ${row.Email || 'N/A'}`);
+    return { valid: true, row };
   } catch (err) {
     console.log(`[${now()}] Fetch error MC ${mc} → ${err?.message}`);
     return { valid: false };
@@ -218,26 +252,22 @@ async function run() {
 
   const raw = fs.readFileSync(INPUT_FILE, 'utf-8');
   const allMCs = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const mcList = allMCs;
+  
+  console.log(`[${now()}] Running batch index ${BATCH_INDEX} with ${allMCs.length} MCs.`);
 
-  console.log(`[${now()}] Running batch index ${BATCH_INDEX} with ${mcList.length} MCs.`);
-
-  if (mcList.length === 0) {
+  if (allMCs.length === 0) {
     console.log(`[${now()}] No MCs in this batch. Exiting.`);
     return;
   }
 
   const rows = [];
-  const validUrls = [];
-
-  for (let i = 0; i < mcList.length; i += CONCURRENCY) {
-    const slice = mcList.slice(i, i + CONCURRENCY);
-    console.log(`[${now()}] Processing slice ${i / CONCURRENCY + 1} (items ${i} to ${i + slice.length - 1})`);
+  for (let i = 0; i < allMCs.length; i += CONCURRENCY) {
+    const slice = allMCs.slice(i, i + CONCURRENCY);
+    console.log(`[${now()}] Processing slice ${Math.floor(i / CONCURRENCY) + 1} (items ${i} to ${i + slice.length - 1})`);
     const results = await Promise.all(slice.map(handleMC));
     for (const r of results) {
-      if (r?.valid) {
-        if (r.url) validUrls.push(r.url);
-        if (r.row) rows.push(r.row);
+      if (r?.valid && r.row) {
+        rows.push(r.row);
       }
     }
     await sleep(Math.max(50, DELAY));
@@ -246,20 +276,21 @@ async function run() {
   if (rows.length > 0) {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const outCsv = path.join(OUTPUT_DIR, `fmcsa_batch_${BATCH_INDEX}_${ts}.csv`);
-    const headers = ['mcNumber', 'legalName', 'dbaName', 'entityType', 'operationType', 'phone', 'email', 'physicalAddress', 'mailingAddress', 'city', 'state', 'zip', 'url'];
+    
+    // Use the exact headers you requested
+    const headers = [
+        'MC_Number', 'USDOT_Number', 'Legal_Name', 'City', 'State', 'Status', 
+        'Authority_Type', 'Power_Units', 'Drivers', 'Cargo_Carried', 'Phone', 
+        'Email', 'Operation_Type', 'Entity_Type', 'Script_Output'
+    ];
+
     const csv = [headers.join(',')]
       .concat(rows.map(r => headers.map(h => `"${String(r[h] || '').replace(/"/g, '""')}"`).join(',')))
       .join('\n');
     fs.writeFileSync(outCsv, csv);
     console.log(`[${now()}] ✅ CSV written: ${outCsv} (rows=${rows.length})`);
   } else {
-    console.log(`[${now()}] ⚠️ No data extracted for this batch.`);
-  }
-
-  if (MODE === 'urls' && validUrls.length) {
-    const listPath = path.join(OUTPUT_DIR, `fmcsa_remaining_urls_${BATCH_INDEX}_${Date.now()}.txt`);
-    fs.writeFileSync(listPath, validUrls.join('\n'));
-    console.log(`[${now()}] Remaining URLs saved: ${listPath}`);
+    console.log(`[${now()}] ⚠️ No valid data extracted for this batch (all MCs were filtered out).`);
   }
 }
 
