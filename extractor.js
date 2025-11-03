@@ -2,12 +2,13 @@ import fs from 'fs';
 import path from 'path';
 import fetch from 'node-fetch';
 import AbortController from 'abort-controller';
+import { JSDOM } from 'jsdom'; // We need this new library
 
 // ---- Config ----
 const CONCURRENCY = Number(process.env.CONCURRENCY || 4);
 const DELAY = Number(process.env.DELAY || 1000);
 const BATCH_INDEX = Number(process.env.BATCH_INDEX || 0);
-const MIN_AGE_DAYS = 180; // 6 months
+const MIN_AGE_DAYS = 180;
 
 const FETCH_TIMEOUT_MS = 30000;
 const MAX_RETRIES = 3;
@@ -65,11 +66,11 @@ function htmlToText(s) {
     .trim();
 }
 
-function extractDataByHeader(html, headerText) {
-    const regex = new RegExp(`>${headerText}<\\/a><\\/th>\\s*<td[^>]*>([\\s\\S]*?)<\\/td>`, 'i');
-    const match = html.match(regex);
-    if (match && match[1]) {
-        return htmlToText(match[1]);
+function extractDataByHeader(doc, headerText) {
+    const thElements = Array.from(doc.querySelectorAll('th.querylabelbkg'));
+    const headerElement = thElements.find(th => th.textContent.trim() === headerText);
+    if (headerElement && headerElement.nextElementSibling) {
+        return htmlToText(headerElement.nextElementSibling.innerHTML);
     }
     return '';
 }
@@ -88,35 +89,48 @@ function parseAddress(addressString) {
     return { city: '', state: '' };
 }
 
-// This function now correctly finds items in all sections.
-function getXMarkedItems(html, sectionHeader) {
+// ✅✅✅ THIS IS THE NEW, BULLETPROOF FUNCTION ✅✅✅
+function getXMarkedItems(doc, sectionHeader) {
     const items = [];
-    const sectionRegex = new RegExp(`${sectionHeader.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}[\\s\\S]*?<table[\\s\\S]*?([\\s\\S]*?)<\\/table>`, 'i');
-    const sectionMatch = html.match(sectionRegex);
+    const thElements = Array.from(doc.querySelectorAll('th, td'));
+    const headerElement = thElements.find(el => el.textContent.trim().includes(sectionHeader));
 
-    if (!sectionMatch || !sectionMatch[1]) {
-        return [];
+    if (!headerElement) return [];
+
+    // Find the parent table of the header
+    let currentElement = headerElement;
+    while (currentElement && currentElement.tagName !== 'TABLE') {
+        currentElement = currentElement.parentElement;
     }
+    if (!currentElement) return []; // No parent table found
 
-    const tableHtml = sectionMatch[1];
-    const findXRegex = /<td class="queryfield"[^>]*>X<\/td>\s*<td><font[^>]+>([^<]+)<\/font><\/td>/gi;
-    let match;
-    while ((match = findXRegex.exec(tableHtml)) !== null) {
-        items.push(match[1].trim());
+    const table = currentElement;
+    const xCells = Array.from(table.querySelectorAll('td.queryfield'));
+
+    for (const cell of xCells) {
+        if (cell.textContent.trim().toUpperCase() === 'X') {
+            const nextCell = cell.nextElementSibling;
+            if (nextCell) {
+                items.push(nextCell.textContent.trim());
+            }
+        }
     }
     return [...new Set(items)];
 }
 
 async function extractAllData(url, html) {
-    const legalName = extractDataByHeader(html, 'Legal Name:');
-    const usdotNumber = extractDataByHeader(html, 'USDOT Number:');
-    const phone = extractDataByHeader(html, 'Phone:');
-    const entityType = extractDataByHeader(html, 'Entity Type:');
-    const powerUnits = extractDataByHeader(html, 'Power Units:');
-    const drivers = extractDataByHeader(html, 'Drivers:');
+    const dom = new JSDOM(html);
+    const doc = dom.window.document;
+
+    const legalName = extractDataByHeader(doc, 'Legal Name:');
+    const usdotNumber = extractDataByHeader(doc, 'USDOT Number:');
+    const phone = extractDataByHeader(doc, 'Phone:');
+    const entityType = extractDataByHeader(doc, 'Entity Type:');
+    const powerUnits = extractDataByHeader(doc, 'Power Units:');
+    const drivers = extractDataByHeader(doc, 'Drivers:');
     
-    const usdotStatus = extractDataByHeader(html, 'USDOT Status:');
-    const authStatusText = extractDataByHeader(html, 'Operating Authority Status:');
+    const usdotStatus = extractDataByHeader(doc, 'USDOT Status:');
+    const authStatusText = extractDataByHeader(doc, 'Operating Authority Status:');
     const status = usdotStatus.toUpperCase().includes('ACTIVE') && authStatusText.toUpperCase().includes('AUTHORIZED') ? 'Active' : 'Inactive';
 
     let mcNumber = '';
@@ -125,16 +139,14 @@ async function extractAllData(url, html) {
         mcNumber = mcMatch[1];
     }
 
-    const physicalAddress = extractDataByHeader(html, 'Physical Address:');
+    const physicalAddress = extractDataByHeader(doc, 'Physical Address:');
     const { city, state } = parseAddress(physicalAddress);
 
     const authorityTypeMatch = authStatusText.match(/AUTHORIZED FOR (Property|Passenger|HHG)/i);
     const authorityType = authorityTypeMatch ? authorityTypeMatch[1] : '';
 
-    // ✅✅✅ THIS IS THE FINAL FIX ✅✅✅
-    // We are now correctly targeting "Carrier Operation:" for Operation Type
-    const operationTypes = getXMarkedItems(html, 'Carrier Operation:');
-    const cargoCarried = getXMarkedItems(html, 'Cargo Carried:');
+    const operationTypes = getXMarkedItems(doc, 'Carrier Operation:');
+    const cargoCarried = getXMarkedItems(doc, 'Cargo Carried:');
 
     let email = '';
     const smsLinkMatch = html.match(/href=["']([^"']*(safer_xfr\.aspx|\/SMS\/)[^"']*)["']/i);
@@ -185,13 +197,16 @@ async function handleMC(mc) {
       return { valid: false };
     }
 
-    const authStatusText = extractDataByHeader(html, 'Operating Authority Status:').toUpperCase();
+    const dom = new JSDOM(html);
+    const doc = dom.window.document;
+
+    const authStatusText = extractDataByHeader(doc, 'Operating Authority Status:').toUpperCase();
     if (authStatusText.includes('NOT AUTHORIZED') || !authStatusText.includes('AUTHORIZED')) {
         console.log(`[${now()}] SKIPPING (Not Authorized) MC ${mc}`);
         return { valid: false };
     }
 
-    const dateStr = extractDataByHeader(html, 'MCS-150 Form Date:');
+    const dateStr = extractDataByHeader(doc, 'MCS-150 Form Date:');
     if (dateStr) {
         const formDate = new Date(dateStr);
         const today = new Date();
@@ -206,14 +221,14 @@ async function handleMC(mc) {
         return { valid: false };
     }
 
-    const puText = extractDataByHeader(html, 'Power Units:');
+    const puText = extractDataByHeader(doc, 'Power Units:');
     const powerUnits = Number(puText.replace(/,/g, ''));
     if (isNaN(powerUnits) || powerUnits < 1) {
         console.log(`[${now()}] SKIPPING (PU < 1): ${puText || 'N/A'} units for MC ${mc}`);
         return { valid: false };
     }
 
-    const driverText = extractDataByHeader(html, 'Drivers:');
+    const driverText = extractDataByHeader(doc, 'Drivers:');
     const drivers = Number(driverText.replace(/,/g, ''));
     if (isNaN(drivers) || drivers < 1) {
         console.log(`[${now()}] SKIPPING (Drivers < 1): ${driverText || 'N/A'} drivers for MC ${mc}`);
@@ -221,7 +236,7 @@ async function handleMC(mc) {
     }
 
     const row = await extractAllData(url, html);
-    console.log(`[${now()}] SAVED → ${row.MC_Number || mc} | ${row.Legal_Name || '(no name)'} | Op: ${row.Operation_Type || 'N/A'}`);
+    console.log(`[${now()}] SAVED → ${row.MC_Number || mc} | ${row.Legal_Name || '(no name)'} | Op: ${row.Operation_Type || 'N/A'} | Cargo: ${row.Cargo_Carried || 'N/A'}`);
     return { valid: true, row };
   } catch (err) {
     console.log(`[${now()}] Fetch error MC ${mc} → ${err?.message}`);
