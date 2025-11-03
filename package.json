@@ -1,11 +1,12 @@
 {
-  "name": "fmcsa-headless",
+  "name": "fmcsa-headless-extractor",
   "version": "1.0.0",
   "type": "module",
-  "description": "Headless FMCSA extractor (Node + Actions)",
+  "description": "Headless FMCSA extractor for GitHub Actions",
   "dependencies": {
     "node-fetch": "^3.3.2",
-    "abort-controller": "^3.0.0"
+    "abort-controller": "^3.0.0",
+    "jsdom": "^24.1.0"
   },
   "scripts": {
     "start": "node extractor.js"
