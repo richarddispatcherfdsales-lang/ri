@@ -100,22 +100,25 @@ function parseAddress(addressString) {
 function getXMarkedItems(html, sectionHeader) {
     const items = [];
     // This regex first finds the correct table based on the sectionHeader, then looks for 'X' marks inside it.
-    const sectionRegex = new RegExp(`${sectionHeader}<\\/a><\\/td>[\\s\\S]*?<table.*?([\\s\\S]*?)<\\/table>`, 'i');
+    const sectionRegex = new RegExp(`${sectionHeader.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}<\\/a><\\/td>[\\s\\S]*?<table.*?([\\s\\S]*?)<\\/table>`, 'i');
     const sectionMatch = html.match(sectionRegex);
-    
+
     if (!sectionMatch || !sectionMatch[1]) {
-        // Fallback for the very first table on the page (Operation Classification)
-        const opClassRegex = /Operation Classification:[\\s\\S]*?<table.*?([\\s\\S]*?)<\\/table>/i;
-        const opClassMatch = html.match(opClassRegex);
-        if (!opClassMatch || !opClassMatch[1]) return [];
-        
-        const opClassTableHtml = opClassMatch[1];
-        const findXRegex = /<td class="queryfield"[^>]*>X<\/td>\s*<td><font[^>]+>([^<]+)<\/font><\/td>/gi;
-        let match;
-        while ((match = findXRegex.exec(opClassTableHtml)) !== null) {
-            items.push(match[1].trim());
+        // Fallback for the very first table on the page (Operation Classification) which has a different structure
+        if (sectionHeader.includes('Operation Classification')) {
+            const opClassRegex = /Operation Classification:<\/a><\/td>[\s\S]*?<table.*?([\s\S]*?)<\/table>/i;
+            const opClassMatch = html.match(opClassRegex);
+            if (!opClassMatch || !opClassMatch[1]) return [];
+            
+            const tableHtml = opClassMatch[1];
+            const findXRegex = /<td class="queryfield"[^>]*>X<\/td>\s*<td><font[^>]+>([^<]+)<\/font><\/td>/gi;
+            let match;
+            while ((match = findXRegex.exec(tableHtml)) !== null) {
+                items.push(match[1].trim());
+            }
+            return [...new Set(items)];
         }
-        return [...new Set(items)];
+        return [];
     }
 
     const tableHtml = sectionMatch[1];
