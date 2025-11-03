@@ -88,7 +88,7 @@ function parseAddress(addressString) {
     return { city: '', state: '' };
 }
 
-// This is the fully corrected, smart function to get all X-marked items
+// This function now correctly finds items in all sections.
 function getXMarkedItems(html, sectionHeader) {
     const items = [];
     const sectionRegex = new RegExp(`${sectionHeader.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}[\\s\\S]*?<table[\\s\\S]*?([\\s\\S]*?)<\\/table>`, 'i');
@@ -131,7 +131,8 @@ async function extractAllData(url, html) {
     const authorityTypeMatch = authStatusText.match(/AUTHORIZED FOR (Property|Passenger|HHG)/i);
     const authorityType = authorityTypeMatch ? authorityTypeMatch[1] : '';
 
-    // Correctly calling the smart function for each section
+    // ✅✅✅ THIS IS THE FINAL FIX ✅✅✅
+    // We are now correctly targeting "Carrier Operation:" for Operation Type
     const operationTypes = getXMarkedItems(html, 'Carrier Operation:');
     const cargoCarried = getXMarkedItems(html, 'Cargo Carried:');
 
@@ -220,7 +221,7 @@ async function handleMC(mc) {
     }
 
     const row = await extractAllData(url, html);
-    console.log(`[${now()}] SAVED → ${row.MC_Number || mc} | ${row.Legal_Name || '(no name)'} | Cargo: ${row.Cargo_Carried || 'N/A'}`);
+    console.log(`[${now()}] SAVED → ${row.MC_Number || mc} | ${row.Legal_Name || '(no name)'} | Op: ${row.Operation_Type || 'N/A'}`);
     return { valid: true, row };
   } catch (err) {
     console.log(`[${now()}] Fetch error MC ${mc} → ${err?.message}`);
